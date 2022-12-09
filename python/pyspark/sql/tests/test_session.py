@@ -81,6 +81,8 @@ class SparkSessionTests3(unittest.TestCase):
             activeSession = SparkSession.getActiveSession()
             df = activeSession.createDataFrame([(1, "Alice")], ["age", "name"])
             self.assertEqual(df.collect(), [Row(age=1, name="Alice")])
+            with self.assertRaises(ValueError):
+                activeSession.createDataFrame(activeSession._sc.parallelize([[], []]))
         finally:
             spark.stop()
 
@@ -324,6 +326,27 @@ class SparkSessionBuilderTests(unittest.TestCase):
                 session.stop()
             if sc is not None:
                 sc.stop()
+
+    def test_create_spark_context_with_initial_session_options_bool(self):
+        session = None
+        # Test if `True` is set as "true".
+        try:
+            session = SparkSession.builder.config(
+                "spark.sql.pyspark.jvmStacktrace.enabled", True
+            ).getOrCreate()
+            self.assertEqual(session.conf.get("spark.sql.pyspark.jvmStacktrace.enabled"), "true")
+        finally:
+            if session is not None:
+                session.stop()
+        # Test if `False` is set as "false".
+        try:
+            session = SparkSession.builder.config(
+                "spark.sql.pyspark.jvmStacktrace.enabled", False
+            ).getOrCreate()
+            self.assertEqual(session.conf.get("spark.sql.pyspark.jvmStacktrace.enabled"), "false")
+        finally:
+            if session is not None:
+                session.stop()
 
 
 class SparkExtensionsTest(unittest.TestCase):

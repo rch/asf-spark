@@ -28,7 +28,7 @@
   <artifactId>spark-streaming-kinesis-asl-assembly_2.12</artifactId>
   <packaging>jar</packaging>
   <name>Spark Project Kinesis Assembly</name>
-  <url>http://spark.apache.org/</url>
+  <url>https://spark.apache.org/</url>
 
   <properties>
     <sbt.project.name>streaming-kinesis-asl-assembly</sbt.project.name>
@@ -132,7 +132,7 @@
     </dependency>
     <dependency>
       <groupId>org.apache.logging.log4j</groupId>
-      <artifactId>log4j-slf4j-impl</artifactId>
+      <artifactId>log4j-slf4j2-impl</artifactId>
       <version>${log4j.version}</version>
       <scope>provided</scope>
     </dependency>

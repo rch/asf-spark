@@ -308,6 +308,7 @@ class TaskData private[spark](
     val taskId: Long,
     val index: Int,
     val attempt: Int,
+    val partitionId: Int,
     val launchTime: Date,
     val resultFetchStart: Option[Date],
     @JsonDeserialize(contentAs = classOf[JLong])
@@ -423,7 +424,7 @@ class ExecutorPeakMetricsDistributions private[spark](
   /** Returns the distributions for the specified metric. */
   def getMetricDistribution(metricName: String): IndexedSeq[Double] = {
     val sorted = executorMetrics.map(_.getMetricValue(metricName)).sorted
-    indices.map(i => sorted(i.toInt).toDouble).toIndexedSeq
+    indices.map(i => sorted(i.toInt).toDouble)
   }
 }
 
@@ -458,6 +459,7 @@ class ApplicationEnvironmentInfo private[spark] (
     val sparkProperties: Seq[(String, String)],
     val hadoopProperties: Seq[(String, String)],
     val systemProperties: Seq[(String, String)],
+    val metricsProperties: Seq[(String, String)],
     val classpathEntries: Seq[(String, String)],
     val resourceProfiles: Seq[ResourceProfileInfo])
 

@@ -63,7 +63,7 @@ class RocksDB(
   private val readOptions = new ReadOptions()  // used for gets
   private val writeOptions = new WriteOptions().setSync(true)  // wait for batched write to complete
   private val flushOptions = new FlushOptions().setWaitForFlush(true)  // wait for flush to complete
-  private val writeBatch = new WriteBatchWithIndex(true)  // overwrite multiple updates to a key
+  private var writeBatch = new WriteBatchWithIndex(true)  // overwrite multiple updates to a key
 
   private val bloomFilter = new BloomFilter()
   private val tableFormatConfig = new BlockBasedTableConfig()
@@ -75,6 +75,7 @@ class RocksDB(
   private val dbOptions = new Options() // options to open the RocksDB
   dbOptions.setCreateIfMissing(true)
   dbOptions.setTableFormatConfig(tableFormatConfig)
+  dbOptions.setMaxOpenFiles(conf.maxOpenFiles)
   private val dbLogger = createLogger() // for forwarding RocksDB native logs to log4j
   dbOptions.setStatistics(new Statistics())
   private val nativeStats = dbOptions.statistics()
@@ -132,9 +133,10 @@ class RocksDB(
       if (conf.resetStatsOnLoad) {
         nativeStats.reset
       }
-      // reset resources to prevent side-effects from previous loaded version
+      // reset resources to prevent side-effects from previous loaded version if it was not cleaned
+      // up correctly
       closePrefixScanIterators()
-      writeBatch.clear()
+      resetWriteBatch()
       logInfo(s"Loaded $version")
     } catch {
       case t: Throwable =>
@@ -318,6 +320,10 @@ class RocksDB(
     } finally {
       db.continueBackgroundWork()
       silentDeleteRecursively(checkpointDir, s"committing $newVersion")
+      // reset resources as either 1) we already pushed the changes and it has been committed or
+      // 2) commit has failed and the current version is "invalidated".
+      closePrefixScanIterators()
+      resetWriteBatch()
       release()
     }
   }
@@ -327,7 +333,7 @@ class RocksDB(
    */
   def rollback(): Unit = {
     closePrefixScanIterators()
-    writeBatch.clear()
+    resetWriteBatch()
     numKeysOnWritingVersion = numKeysOnLoadedVersion
     release()
     logInfo(s"Rolled back to $loadedVersion")
@@ -450,8 +456,15 @@ class RocksDB(
   }
 
   private def closePrefixScanIterators(): Unit = {
-    prefixScanReuseIter.entrySet().asScala.foreach(_.getValue.close())
+    prefixScanReuseIter.values().asScala.foreach(_.close())
     prefixScanReuseIter.clear()
+  }
+
+  /** Create a new WriteBatch, clear doesn't deallocate the native memory */
+  private def resetWriteBatch(): Unit = {
+    writeBatch.clear()
+    writeBatch.close()
+    writeBatch = new WriteBatchWithIndex(true)
   }
 
   private def getDBProperty(property: String): Long = {
@@ -542,7 +555,8 @@ case class RocksDBConf(
     lockAcquireTimeoutMs: Long,
     resetStatsOnLoad : Boolean,
     formatVersion: Int,
-    trackTotalNumberOfRows: Boolean)
+    trackTotalNumberOfRows: Boolean,
+    maxOpenFiles: Int)
 
 object RocksDBConf {
   /** Common prefix of all confs in SQLConf that affects RocksDB */
@@ -558,6 +572,9 @@ object RocksDBConf {
   private val BLOCK_CACHE_SIZE_MB_CONF = ConfEntry("blockCacheSizeMB", "8")
   private val LOCK_ACQUIRE_TIMEOUT_MS_CONF = ConfEntry("lockAcquireTimeoutMs", "60000")
   private val RESET_STATS_ON_LOAD = ConfEntry("resetStatsOnLoad", "true")
+  // Config to specify the number of open files that can be used by the DB. Value of -1 means
+  // that files opened are always kept open.
+  private val MAX_OPEN_FILES_CONF = ConfEntry("maxOpenFiles", "-1")
   // Configuration to set the RocksDB format version. When upgrading the RocksDB version in Spark,
   // it may introduce a new table format version that can not be supported by an old RocksDB version
   // used by an old Spark version. Hence, we store the table format version in the checkpoint when
@@ -588,6 +605,13 @@ object RocksDBConf {
       }
     }
 
+    def getIntConf(conf: ConfEntry): Int = {
+      Try { confs.getOrElse(conf.fullName, conf.default).toInt } getOrElse {
+        throw new IllegalArgumentException(s"Invalid value for '${conf.fullName}', " +
+          "must be an integer")
+      }
+    }
+
     def getPositiveLongConf(conf: ConfEntry): Long = {
       Try { confs.getOrElse(conf.fullName, conf.default).toLong } filter { _ >= 0 } getOrElse {
         throw new IllegalArgumentException(
@@ -610,7 +634,8 @@ object RocksDBConf {
       getPositiveLongConf(LOCK_ACQUIRE_TIMEOUT_MS_CONF),
       getBooleanConf(RESET_STATS_ON_LOAD),
       getPositiveIntConf(FORMAT_VERSION),
-      getBooleanConf(TRACK_TOTAL_NUMBER_OF_ROWS))
+      getBooleanConf(TRACK_TOTAL_NUMBER_OF_ROWS),
+      getIntConf(MAX_OPEN_FILES_CONF))
   }
 
   def apply(): RocksDBConf = apply(new StateStoreConf())

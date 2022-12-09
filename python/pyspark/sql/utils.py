@@ -29,6 +29,15 @@ from py4j.protocol import Py4JJavaError
 from pyspark import SparkContext
 from pyspark.find_spark_home import _find_spark_home
 
+has_numpy = False
+try:
+    import numpy as np  # noqa: F401
+
+    has_numpy = True
+except ImportError:
+    pass
+
+
 if TYPE_CHECKING:
     from pyspark.sql.session import SparkSession
     from pyspark.sql.dataframe import DataFrame
@@ -264,9 +273,13 @@ class ForeachBatchFunction:
 
     def call(self, jdf: JavaObject, batch_id: int) -> None:
         from pyspark.sql.dataframe import DataFrame
+        from pyspark.sql.session import SparkSession
 
         try:
-            self.func(DataFrame(jdf, self.session), batch_id)
+            session_jdf = jdf.sparkSession()
+            # assuming that spark context is still the same between JVM and PySpark
+            wrapped_session_jdf = SparkSession(self.session.sparkContext, session_jdf)
+            self.func(DataFrame(jdf, wrapped_session_jdf), batch_id)
         except Exception as e:
             self.error = e
             raise e
@@ -293,11 +306,4 @@ def is_timestamp_ntz_preferred() -> bool:
     Return a bool if TimestampNTZType is preferred according to the SQL configuration set.
     """
     jvm = SparkContext._jvm
-    return (
-        jvm is not None
-        and getattr(getattr(jvm.org.apache.spark.sql.internal, "SQLConf$"), "MODULE$")
-        .get()
-        .timestampType()
-        .typeName()
-        == "timestamp_ntz"
-    )
+    return jvm is not None and jvm.PythonSQLUtils.isTimestampNTZPreferred()

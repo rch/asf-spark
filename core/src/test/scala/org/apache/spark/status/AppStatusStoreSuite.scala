@@ -22,7 +22,7 @@ import scala.util.Random
 import org.apache.spark.{SparkConf, SparkFunSuite}
 import org.apache.spark.executor.TaskMetrics
 import org.apache.spark.internal.config.History.{HYBRID_STORE_DISK_BACKEND, HybridStoreDiskBackend}
-import org.apache.spark.internal.config.Status.LIVE_ENTITY_UPDATE_PERIOD
+import org.apache.spark.internal.config.Status.{LIVE_ENTITY_UPDATE_PERIOD, LIVE_UI_LOCAL_STORE_DIR}
 import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.scheduler.{SparkListenerStageSubmitted, SparkListenerTaskStart, StageInfo, TaskInfo, TaskLocality}
 import org.apache.spark.status.api.v1.SpeculationStageSummary
@@ -88,11 +88,19 @@ class AppStatusStoreSuite extends SparkFunSuite {
       live: Boolean): AppStatusStore = {
     val conf = new SparkConf()
     if (live) {
-      return AppStatusStore.createLiveStore(conf)
-    }
-    // LevelDB doesn't support Apple Silicon yet
-    if (Utils.isMacOnAppleSilicon && disk) {
-      return null
+      if (disk) {
+        val testDir = Utils.createTempDir()
+        conf.set(LIVE_UI_LOCAL_STORE_DIR, testDir.getCanonicalPath)
+      }
+      val liveStore = AppStatusStore.createLiveStore(conf)
+      if (disk) {
+        val rocksDBCreated = liveStore.store match {
+          case e: ElementTrackingStore => !e.usingInMemoryStore
+          case _ => false
+        }
+        assert(rocksDBCreated)
+      }
+      return liveStore
     }
 
     val store: KVStore = if (disk) {
@@ -106,12 +114,23 @@ class AppStatusStoreSuite extends SparkFunSuite {
     new AppStatusStore(store)
   }
 
-  Seq(
-    "disk leveldb" -> createAppStore(disk = true, HybridStoreDiskBackend.LEVELDB, live = false),
-    "disk rocksdb" -> createAppStore(disk = true, HybridStoreDiskBackend.ROCKSDB, live = false),
-    "in memory" -> createAppStore(disk = false, live = false),
-    "in memory live" -> createAppStore(disk = false, live = true)
-  ).foreach { case (hint, appStore) =>
+  private val cases = {
+    val baseCases = Seq(
+      "disk rocksdb" -> createAppStore(disk = true, HybridStoreDiskBackend.ROCKSDB, live = false),
+      "in memory" -> createAppStore(disk = false, live = false),
+      "in memory live" -> createAppStore(disk = false, live = true),
+      "rocksdb live" -> createAppStore(disk = true, HybridStoreDiskBackend.ROCKSDB, live = true)
+    )
+    if (Utils.isMacOnAppleSilicon) {
+      baseCases
+    } else {
+      Seq(
+        "disk leveldb" -> createAppStore(disk = true, HybridStoreDiskBackend.LEVELDB, live = false)
+      ) ++ baseCases
+    }
+  }
+
+  cases.foreach { case (hint, appStore) =>
     test(s"SPARK-26260: summary should contain only successful tasks' metrics (store = $hint)") {
       assume(appStore != null)
       val store = appStore.store
@@ -219,7 +238,8 @@ class AppStatusStoreSuite extends SparkFunSuite {
       resourceProfileId = ResourceProfile.DEFAULT_RESOURCE_PROFILE_ID)
     (1 to 2).foreach {
       taskId =>
-        val taskInfo = new TaskInfo(taskId, taskId, 0, 0, "0", "localhost", TaskLocality.ANY,
+        val taskInfo = new TaskInfo(
+          taskId, taskId, 0, taskId, 0, "0", "localhost", TaskLocality.ANY,
           false)
         listener.onStageSubmitted(SparkListenerStageSubmitted(stageInfo))
         listener.onTaskStart(SparkListenerTaskStart(0, 0, taskInfo))
@@ -246,14 +266,15 @@ class AppStatusStoreSuite extends SparkFunSuite {
 
   private def newTaskData(i: Int, status: String = "SUCCESS"): TaskDataWrapper = {
     new TaskDataWrapper(
-      i.toLong, i, i, i, i, i, i.toString, i.toString, status, i.toString, false, Nil, None, true,
+      i.toLong, i, i, i, i, i, i,
+      i.toString, i.toString, status, i.toString, false, Nil, None, true,
       i, i, i, i, i, i, i, i, i, i,
       i, i, i, i, i, i, i, i, i, i,
       i, i, i, i, stageId, attemptId)
   }
 
   private def writeTaskDataToStore(i: Int, store: KVStore, status: String): Unit = {
-    val liveTask = new LiveTask(new TaskInfo( i.toLong, i, i, i.toLong, i.toString,
+    val liveTask = new LiveTask(new TaskInfo( i.toLong, i, i, i, i.toLong, i.toString,
        i.toString, TaskLocality.ANY, false), stageId, attemptId, None)
 
     if (status == "SUCCESS") {

@@ -25,6 +25,7 @@ import org.apache.avro.Schema;
 import org.apache.avro.file.CodecFactory;
 import org.apache.avro.file.DataFileWriter;
 import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericDatumWriter;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.mapred.AvroKey;
 import org.apache.avro.mapreduce.AvroKeyOutputFormat;
@@ -46,13 +47,14 @@ class SparkAvroKeyOutputFormat extends AvroKeyOutputFormat<GenericRecord> {
       this.metadata = metadata;
     }
 
+    @Override
     protected RecordWriter<AvroKey<GenericRecord>, NullWritable> create(
         Schema writerSchema,
         GenericData dataModel,
         CodecFactory compressionCodec,
         OutputStream outputStream,
         int syncInterval) throws IOException {
-      return new SparkAvroKeyRecordWriter(
+      return new SparkAvroKeyRecordWriter<>(
         writerSchema, dataModel, compressionCodec, outputStream, syncInterval, metadata);
     }
   }
@@ -71,7 +73,7 @@ class SparkAvroKeyRecordWriter<T> extends RecordWriter<AvroKey<T>, NullWritable>
       OutputStream outputStream,
       int syncInterval,
       Map<String, String> metadata) throws IOException {
-    this.mAvroFileWriter = new DataFileWriter(dataModel.createDatumWriter(writerSchema));
+    this.mAvroFileWriter = new DataFileWriter<>(new GenericDatumWriter<>(writerSchema, dataModel));
     for (Map.Entry<String, String> entry : metadata.entrySet()) {
       this.mAvroFileWriter.setMeta(entry.getKey(), entry.getValue());
     }
@@ -80,14 +82,17 @@ class SparkAvroKeyRecordWriter<T> extends RecordWriter<AvroKey<T>, NullWritable>
     this.mAvroFileWriter.create(writerSchema, outputStream);
   }
 
+  @Override
   public void write(AvroKey<T> record, NullWritable ignore) throws IOException {
     this.mAvroFileWriter.append(record.datum());
   }
 
+  @Override
   public void close(TaskAttemptContext context) throws IOException {
     this.mAvroFileWriter.close();
   }
 
+  @Override
   public long sync() throws IOException {
     return this.mAvroFileWriter.sync();
   }

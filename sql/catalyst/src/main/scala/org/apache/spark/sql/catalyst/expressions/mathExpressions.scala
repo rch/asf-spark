@@ -22,11 +22,12 @@ import java.util.Locale
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.{ExpressionBuilder, FunctionRegistry, TypeCheckResult}
-import org.apache.spark.sql.catalyst.analysis.TypeCheckResult.{TypeCheckFailure, TypeCheckSuccess}
+import org.apache.spark.sql.catalyst.analysis.TypeCheckResult.{DataTypeMismatch, TypeCheckSuccess}
+import org.apache.spark.sql.catalyst.expressions.Cast._
 import org.apache.spark.sql.catalyst.expressions.codegen._
 import org.apache.spark.sql.catalyst.expressions.codegen.Block._
 import org.apache.spark.sql.catalyst.util.{NumberConverter, TypeUtils}
-import org.apache.spark.sql.errors.QueryCompilationErrors
+import org.apache.spark.sql.errors.{QueryCompilationErrors, QueryExecutionErrors}
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
 
@@ -317,20 +318,9 @@ object CeilExpressionBuilder extends CeilFloorExpressionBuilderBase {
 }
 
 case class RoundCeil(child: Expression, scale: Expression)
-  extends RoundBase(child, scale, BigDecimal.RoundingMode.CEILING, "ROUND_CEILING")
-    with ImplicitCastInputTypes {
+  extends RoundBase(child, scale, BigDecimal.RoundingMode.CEILING, "ROUND_CEILING") {
 
   override def inputTypes: Seq[AbstractDataType] = Seq(DecimalType, IntegerType)
-
-  override lazy val dataType: DataType = child.dataType match {
-    case DecimalType.Fixed(p, s) =>
-      if (_scale < 0) {
-        DecimalType(math.max(p, 1 - _scale), 0)
-      } else {
-        DecimalType(p, math.min(s, _scale))
-      }
-    case t => t
-  }
 
   override def nodeName: String = "ceil"
 
@@ -563,20 +553,9 @@ object FloorExpressionBuilder extends CeilFloorExpressionBuilderBase {
 }
 
 case class RoundFloor(child: Expression, scale: Expression)
-  extends RoundBase(child, scale, BigDecimal.RoundingMode.FLOOR, "ROUND_FLOOR")
-    with ImplicitCastInputTypes {
+  extends RoundBase(child, scale, BigDecimal.RoundingMode.FLOOR, "ROUND_FLOOR") {
 
   override def inputTypes: Seq[AbstractDataType] = Seq(DecimalType, IntegerType)
-
-  override lazy val dataType: DataType = child.dataType match {
-    case DecimalType.Fixed(p, s) =>
-      if (_scale < 0) {
-        DecimalType(math.max(p, 1 - _scale), 0)
-      } else {
-        DecimalType(p, math.min(s, _scale))
-      }
-    case t => t
-  }
 
   override def nodeName: String = "floor"
 
@@ -1057,6 +1036,7 @@ object Hex {
   def unhex(bytes: Array[Byte]): Array[Byte] = {
     val out = new Array[Byte]((bytes.length + 1) >> 1)
     var i = 0
+    var oddShift = 0
     if ((bytes.length & 0x01) != 0) {
       // padding with '0'
       if (bytes(0) < 0) {
@@ -1068,6 +1048,7 @@ object Hex {
       }
       out(0) = v
       i += 1
+      oddShift = 1
     }
     // two characters form the hex value.
     while (i < bytes.length) {
@@ -1079,7 +1060,7 @@ object Hex {
       if (first == -1 || second == -1) {
         return null
       }
-      out(i / 2) = (((first << 4) | second) & 0xFF).toByte
+      out(i / 2 + oddShift) = (((first << 4) | second) & 0xFF).toByte
       i += 2
     }
     out
@@ -1142,28 +1123,58 @@ case class Hex(child: Expression)
   """,
   since = "1.5.0",
   group = "math_funcs")
-case class Unhex(child: Expression)
+case class Unhex(child: Expression, failOnError: Boolean = false)
   extends UnaryExpression with ImplicitCastInputTypes with NullIntolerant {
+
+  def this(expr: Expression) = this(expr, false)
 
   override def inputTypes: Seq[AbstractDataType] = Seq(StringType)
 
   override def nullable: Boolean = true
   override def dataType: DataType = BinaryType
 
-  protected override def nullSafeEval(num: Any): Any =
-    Hex.unhex(num.asInstanceOf[UTF8String].getBytes)
+  protected override def nullSafeEval(num: Any): Any = {
+    val result = Hex.unhex(num.asInstanceOf[UTF8String].getBytes)
+    if (failOnError && result == null) {
+      // The failOnError is set only from `ToBinary` function - hence we might safely set `hint`
+      // parameter to `try_to_binary`.
+      throw QueryExecutionErrors.invalidInputInConversionError(
+        BinaryType,
+        num.asInstanceOf[UTF8String],
+        UTF8String.fromString("HEX"),
+        "try_to_binary")
+    }
+    result
+  }
 
   override protected def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
-    nullSafeCodeGen(ctx, ev, (c) => {
+    nullSafeCodeGen(ctx, ev, c => {
       val hex = Hex.getClass.getName.stripSuffix("$")
+      val maybeFailOnErrorCode = if (failOnError) {
+        val format = UTF8String.fromString("BASE64");
+        val binaryType = ctx.addReferenceObj("to", BinaryType, BinaryType.getClass.getName)
+        s"""
+           |if (${ev.value} == null) {
+           |  throw QueryExecutionErrors.invalidInputInConversionError(
+           |    $binaryType,
+           |    $c,
+           |    $format,
+           |    "try_to_binary");
+           |}
+           |""".stripMargin
+      } else {
+        s"${ev.isNull} = ${ev.value} == null;"
+      }
+
       s"""
         ${ev.value} = $hex.unhex($c.getBytes());
-        ${ev.isNull} = ${ev.value} == null;
+        $maybeFailOnErrorCode
        """
     })
   }
 
-  override protected def withNewChildInternal(newChild: Expression): Unhex = copy(child = newChild)
+  override protected def withNewChildInternal(newChild: Expression): Unhex =
+    copy(child = newChild, failOnError)
 }
 
 
@@ -1447,9 +1458,21 @@ abstract class RoundBase(child: Expression, scale: Expression,
   override def foldable: Boolean = child.foldable
 
   override lazy val dataType: DataType = child.dataType match {
-    // if the new scale is bigger which means we are scaling up,
-    // keep the original scale as `Decimal` does
-    case DecimalType.Fixed(p, s) => DecimalType(p, if (_scale > s) s else _scale)
+    case DecimalType.Fixed(p, s) =>
+      // After rounding we may need one more digit in the integral part,
+      // e.g. `ceil(9.9, 0)` -> `10`, `ceil(99, -1)` -> `100`.
+      val integralLeastNumDigits = p - s + 1
+      if (_scale < 0) {
+        // negative scale means we need to adjust `-scale` number of digits before the decimal
+        // point, which means we need at lease `-scale + 1` digits (after rounding).
+        val newPrecision = math.max(integralLeastNumDigits, -_scale + 1)
+        // We have to accept the risk of overflow as we can't exceed the max precision.
+        DecimalType(math.min(newPrecision, DecimalType.MAX_PRECISION), 0)
+      } else {
+        val newScale = math.min(s, _scale)
+        // We have to accept the risk of overflow as we can't exceed the max precision.
+        DecimalType(math.min(integralLeastNumDigits + newScale, 38), newScale)
+      }
     case t => t
   }
 
@@ -1461,7 +1484,12 @@ abstract class RoundBase(child: Expression, scale: Expression,
         if (scale.foldable) {
           TypeCheckSuccess
         } else {
-          TypeCheckFailure("Only foldable Expression is allowed for scale arguments")
+          DataTypeMismatch(
+            errorSubClass = "NON_FOLDABLE_INPUT",
+            messageParameters = Map(
+              "inputName" -> "scala",
+              "inputType" -> toSQLType(scale.dataType),
+              "inputExpr" -> toSQLExpr(scale)))
         }
       case f => f
     }
@@ -1530,7 +1558,7 @@ abstract class RoundBase(child: Expression, scale: Expression,
         if (_scale >= 0) {
           s"""
             ${ev.value} = ${ce.value}.toPrecision(${ce.value}.precision(), $s,
-            Decimal.$modeStr(), true);
+            Decimal.$modeStr(), true, null);
             ${ev.isNull} = ${ev.value} == null;"""
        } else {
           s"""
@@ -1616,13 +1644,14 @@ abstract class RoundBase(child: Expression, scale: Expression,
     Examples:
       > SELECT _FUNC_(2.5, 0);
        3
+      > SELECT _FUNC_(25, -1);
+       30
   """,
   since = "1.5.0",
   group = "math_funcs")
 // scalastyle:on line.size.limit
 case class Round(child: Expression, scale: Expression)
-  extends RoundBase(child, scale, BigDecimal.RoundingMode.HALF_UP, "ROUND_HALF_UP")
-    with Serializable with ImplicitCastInputTypes {
+  extends RoundBase(child, scale, BigDecimal.RoundingMode.HALF_UP, "ROUND_HALF_UP") {
   def this(child: Expression) = this(child, Literal(0))
   override protected def withNewChildrenInternal(newLeft: Expression, newRight: Expression): Round =
     copy(child = newLeft, scale = newRight)
@@ -1640,13 +1669,14 @@ case class Round(child: Expression, scale: Expression)
     Examples:
       > SELECT _FUNC_(2.5, 0);
        2
+      > SELECT _FUNC_(25, -1);
+       20
   """,
   since = "2.0.0",
   group = "math_funcs")
 // scalastyle:on line.size.limit
 case class BRound(child: Expression, scale: Expression)
-  extends RoundBase(child, scale, BigDecimal.RoundingMode.HALF_EVEN, "ROUND_HALF_EVEN")
-    with Serializable with ImplicitCastInputTypes {
+  extends RoundBase(child, scale, BigDecimal.RoundingMode.HALF_EVEN, "ROUND_HALF_EVEN") {
   def this(child: Expression) = this(child, Literal(0))
   override protected def withNewChildrenInternal(
     newLeft: Expression, newRight: Expression): BRound = copy(child = newLeft, scale = newRight)
@@ -1766,7 +1796,7 @@ case class WidthBucket(
             TypeCheckSuccess
           case _ =>
             val types = Seq(value.dataType, minValue.dataType, maxValue.dataType)
-            TypeUtils.checkForSameTypeInputExpr(types, s"function $prettyName")
+            TypeUtils.checkForSameTypeInputExpr(types, prettyName)
         }
       case f => f
     }

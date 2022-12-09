@@ -46,7 +46,7 @@ case class AggregateInPandasExec(
     udfExpressions: Seq[PythonUDF],
     resultExpressions: Seq[NamedExpression],
     child: SparkPlan)
-  extends UnaryExecNode {
+  extends UnaryExecNode with PythonSQLMetrics {
 
   override val output: Seq[Attribute] = resultExpressions.map(_.toAttribute)
 
@@ -120,7 +120,7 @@ case class AggregateInPandasExec(
     // Schema of input rows to the python runner
     val aggInputSchema = StructType(dataTypes.zipWithIndex.map { case (dt, i) =>
       StructField(s"_$i", dt)
-    }.toSeq)
+    }.toArray)
 
     // Map grouped rows to ArrowPythonRunner results, Only execute if partition is not empty
     inputRDD.mapPartitionsInternal { iter => if (iter.isEmpty) iter else {
@@ -131,12 +131,13 @@ case class AggregateInPandasExec(
       val newIter: Iterator[InternalRow] = mayAppendUpdatingSessionIterator(iter)
       val prunedProj = UnsafeProjection.create(allInputs.toSeq, child.output)
 
-      val grouped = if (groupingExpressions.isEmpty) {
+      val groupedItr = if (groupingExpressions.isEmpty) {
         // Use an empty unsafe row as a place holder for the grouping key
         Iterator((new UnsafeRow(), newIter))
       } else {
         GroupedIterator(newIter, groupingExpressions, child.output)
-      }.map { case (key, rows) =>
+      }
+      val grouped = groupedItr.map { case (key, rows) =>
         (key, rows.map(prunedProj))
       }
 
@@ -162,7 +163,8 @@ case class AggregateInPandasExec(
         argOffsets,
         aggInputSchema,
         sessionLocalTimeZone,
-        pythonRunnerConf).compute(projectedRowIter, context.partitionId(), context)
+        pythonRunnerConf,
+        pythonMetrics).compute(projectedRowIter, context.partitionId(), context)
 
       val joinedAttributes =
         groupingExpressions.map(_.toAttribute) ++ udfExpressions.map(_.resultAttribute)

@@ -186,9 +186,7 @@ This is conceptually equivalent to the PySpark example as below:
 **distributed-sequence** (default): It implements a sequence that increases one by one, by group-by and
 group-map approach in a distributed manner. It still generates the sequential index globally.
 If the default index must be the sequence in a large dataset, this
-index has to be used.
-Note that if more data are added to the data source after creating this index,
-then it does not guarantee the sequential index. See the example below:
+index has to be used. See the example below:
 
 .. code-block:: python
 
@@ -273,6 +271,14 @@ compute.ops_on_diff_frames      False                   This determines whether 
                                                         that method throws an exception.
 compute.default_index_type      'distributed-sequence'  This sets the default index type: sequence,
                                                         distributed and distributed-sequence.
+compute.default_index_cache     'MEMORY_AND_DISK_SER'   This sets the default storage level for temporary
+                                                        RDDs cached in distributed-sequence indexing: 'NONE',
+                                                        'DISK_ONLY', 'DISK_ONLY_2', 'DISK_ONLY_3',
+                                                        'MEMORY_ONLY', 'MEMORY_ONLY_2', 'MEMORY_ONLY_SER',
+                                                        'MEMORY_ONLY_SER_2', 'MEMORY_AND_DISK',
+                                                        'MEMORY_AND_DISK_2', 'MEMORY_AND_DISK_SER',
+                                                        'MEMORY_AND_DISK_SER_2', 'OFF_HEAP',
+                                                        'LOCAL_CHECKPOINT'.
 compute.ordered_head            False                   'compute.ordered_head' sets whether or not to operate
                                                         head with natural ordering. pandas-on-Spark does not
                                                         guarantee the row ordering so `head` could return
@@ -290,7 +296,8 @@ compute.eager_check             True                    'compute.eager_check' se
                                                         `Series.asof`, `Series.compare`,
                                                         `FractionalExtensionOps.astype`,
                                                         `IntegralExtensionOps.astype`,
-                                                        `FractionalOps.astype`, `DecimalOps.astype`.
+                                                        `FractionalOps.astype`, `DecimalOps.astype`, `skipna
+                                                        of statistical functions`.
 compute.isin_limit              80                      'compute.isin_limit' sets the limit for filtering by
                                                         'Column.isin(list)'. If the length of the ‘list’ is
                                                         above the limit, broadcast join is used instead for

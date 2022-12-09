@@ -34,8 +34,9 @@ import org.apache.hadoop.mapreduce.Job
 import org.apache.spark.SparkException
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.avro.AvroOptions.ignoreExtensionKey
-import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.avro.AvroOptions.IGNORE_EXTENSION
+import org.apache.spark.sql.catalyst.{FileSourceOptions, InternalRow}
+import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.execution.datasources.OutputWriterFactory
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
@@ -49,15 +50,15 @@ private[sql] object AvroUtils extends Logging {
     val conf = spark.sessionState.newHadoopConfWithOptions(options)
     val parsedOptions = new AvroOptions(options, conf)
 
-    if (parsedOptions.parameters.contains(ignoreExtensionKey)) {
-      logWarning(s"Option $ignoreExtensionKey is deprecated. Please use the " +
+    if (parsedOptions.parameters.contains(IGNORE_EXTENSION)) {
+      logWarning(s"Option $IGNORE_EXTENSION is deprecated. Please use the " +
         "general data source option pathGlobFilter for filtering file names.")
     }
     // User can specify an optional avro json schema.
     val avroSchema = parsedOptions.schema
       .getOrElse {
         inferAvroSchemaFromFiles(files, conf, parsedOptions.ignoreExtension,
-          spark.sessionState.conf.ignoreCorruptFiles)
+          new FileSourceOptions(CaseInsensitiveMap(options)).ignoreCorruptFiles)
       }
 
     SchemaConverters.toSqlType(avroSchema).dataType match {
@@ -206,7 +207,7 @@ private[sql] object AvroUtils extends Logging {
   }
 
   /** Wrapper for a pair of matched fields, one Catalyst and one corresponding Avro field. */
-  case class AvroMatchedField(
+  private[sql] case class AvroMatchedField(
       catalystField: StructField,
       catalystPosition: Int,
       avroField: Schema.Field)

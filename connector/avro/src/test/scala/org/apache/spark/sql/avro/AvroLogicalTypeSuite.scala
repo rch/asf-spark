@@ -24,7 +24,7 @@ import org.apache.avro.Conversions.DecimalConversion
 import org.apache.avro.file.DataFileWriter
 import org.apache.avro.generic.{GenericData, GenericDatumWriter, GenericRecord}
 
-import org.apache.spark.{SparkConf, SparkException}
+import org.apache.spark.{SparkArithmeticException, SparkConf, SparkException}
 import org.apache.spark.sql.{QueryTest, Row}
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
 import org.apache.spark.sql.internal.SQLConf
@@ -129,7 +129,7 @@ abstract class AvroLogicalTypeSuite extends QueryTest with SharedSparkSession {
     withTempDir { dir =>
       val expected = timestampInputData.map(t => Row(new Timestamp(t._1)))
       val timestampAvro = timestampFile(dir.getAbsolutePath)
-      val df = spark.read.format("avro").load(timestampAvro).select('timestamp_millis)
+      val df = spark.read.format("avro").load(timestampAvro).select($"timestamp_millis")
 
       checkAnswer(df, expected)
 
@@ -144,7 +144,7 @@ abstract class AvroLogicalTypeSuite extends QueryTest with SharedSparkSession {
     withTempDir { dir =>
       val expected = timestampInputData.map(t => Row(new Timestamp(t._2)))
       val timestampAvro = timestampFile(dir.getAbsolutePath)
-      val df = spark.read.format("avro").load(timestampAvro).select('timestamp_micros)
+      val df = spark.read.format("avro").load(timestampAvro).select($"timestamp_micros")
 
       checkAnswer(df, expected)
 
@@ -160,7 +160,7 @@ abstract class AvroLogicalTypeSuite extends QueryTest with SharedSparkSession {
       val expected = timestampInputData.map(t =>
         Row(DateTimeUtils.microsToLocalDateTime(DateTimeUtils.millisToMicros(t._3))))
       val timestampAvro = timestampFile(dir.getAbsolutePath)
-      val df = spark.read.format("avro").load(timestampAvro).select('local_timestamp_millis)
+      val df = spark.read.format("avro").load(timestampAvro).select($"local_timestamp_millis")
 
       checkAnswer(df, expected)
 
@@ -176,7 +176,7 @@ abstract class AvroLogicalTypeSuite extends QueryTest with SharedSparkSession {
       val expected = timestampInputData.map(t =>
         Row(DateTimeUtils.microsToLocalDateTime(DateTimeUtils.millisToMicros(t._4))))
       val timestampAvro = timestampFile(dir.getAbsolutePath)
-      val df = spark.read.format("avro").load(timestampAvro).select('local_timestamp_micros)
+      val df = spark.read.format("avro").load(timestampAvro).select($"local_timestamp_micros")
 
       checkAnswer(df, expected)
 
@@ -194,7 +194,8 @@ abstract class AvroLogicalTypeSuite extends QueryTest with SharedSparkSession {
     withTempDir { dir =>
       val timestampAvro = timestampFile(dir.getAbsolutePath)
       val df =
-        spark.read.format("avro").load(timestampAvro).select('timestamp_millis, 'timestamp_micros)
+        spark.read.format("avro").load(timestampAvro)
+          .select($"timestamp_millis", $"timestamp_micros")
 
       val expected = timestampInputData.map(t => Row(new Timestamp(t._1), new Timestamp(t._2)))
 
@@ -226,7 +227,7 @@ abstract class AvroLogicalTypeSuite extends QueryTest with SharedSparkSession {
     withTempDir { dir =>
       val timestampAvro = timestampFile(dir.getAbsolutePath)
       val df = spark.read.format("avro").load(timestampAvro).select(
-        'local_timestamp_millis, 'local_timestamp_micros)
+        $"local_timestamp_millis", $"local_timestamp_micros")
 
       val expected = timestampInputData.map(t =>
         Row(DateTimeUtils.microsToLocalDateTime(DateTimeUtils.millisToMicros(t._3)),
@@ -260,7 +261,7 @@ abstract class AvroLogicalTypeSuite extends QueryTest with SharedSparkSession {
     withTempDir { dir =>
       val timestampAvro = timestampFile(dir.getAbsolutePath)
       val schema = StructType(StructField("long", TimestampType, true) :: Nil)
-      val df = spark.read.format("avro").schema(schema).load(timestampAvro).select('long)
+      val df = spark.read.format("avro").schema(schema).load(timestampAvro).select($"long")
 
       val expected = timestampInputData.map(t => Row(new Timestamp(t._5)))
 
@@ -272,7 +273,7 @@ abstract class AvroLogicalTypeSuite extends QueryTest with SharedSparkSession {
     withTempDir { dir =>
       val timestampAvro = timestampFile(dir.getAbsolutePath)
       val schema = StructType(StructField("long", TimestampNTZType, true) :: Nil)
-      val df = spark.read.format("avro").schema(schema).load(timestampAvro).select('long)
+      val df = spark.read.format("avro").schema(schema).load(timestampAvro).select($"long")
 
       val expected = timestampInputData.map(t =>
         Row(DateTimeUtils.microsToLocalDateTime(DateTimeUtils.millisToMicros(t._5))))
@@ -432,10 +433,17 @@ abstract class AvroLogicalTypeSuite extends QueryTest with SharedSparkSession {
       dataFileWriter.flush()
       dataFileWriter.close()
 
-      val msg = intercept[SparkException] {
-        spark.read.format("avro").load(s"$dir.avro").collect()
-      }.getCause.getCause.getMessage
-      assert(msg.contains("Unscaled value too large for precision"))
+      checkError(
+        exception = intercept[SparkException] {
+          spark.read.format("avro").load(s"$dir.avro").collect()
+        }.getCause.getCause.asInstanceOf[SparkArithmeticException],
+        errorClass = "NUMERIC_VALUE_OUT_OF_RANGE",
+        parameters = Map(
+          "value" -> "0",
+          "precision" -> "4",
+          "scale" -> "2",
+          "config" -> "\"spark.sql.ansi.enabled\"")
+      )
     }
   }
 }
